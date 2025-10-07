@@ -107,10 +107,50 @@ async def assign_complaint(
 # =======================
 # 4) Submit proof for complaint (CM only)
 # =======================
-@router.post("/{complaint_id}/submit-proof", response_model=ComplaintResponse, dependencies=[Depends(roles_required(["CM"]))])
+# @router.post("/{complaint_id}/submit-proof", response_model=ComplaintResponse, dependencies=[Depends(roles_required(["CM"]))])
+# async def submit_proof(
+#     complaint_id: str,
+#     files: List[UploadFile] = File(...)
+# ):
+#     """
+#     Submit proof files (images/docs) for a complaint.
+#     """
+#     upload_folder = f"uploads/{complaint_id}"
+#     os.makedirs(upload_folder, exist_ok=True)
+
+#     proof_files = []
+#     for file in files:
+#         if file.content_type not in ["image/jpeg", "image/png", "application/pdf"]:
+#             raise HTTPException(status_code=400, detail="Invalid file type")
+#         unique_filename = f"{uuid.uuid4()}_{file.filename}"
+#         file_path = os.path.join(upload_folder, unique_filename)
+
+#         with open(file_path, "wb") as f:
+#             shutil.copyfileobj(file.file, f)
+
+#         proof_files.append({
+#             "file_name": file.filename,
+#             "file_url": f"/uploads/{complaint_id}/{unique_filename}"
+#         })
+
+#     return await submit_proof_controller(
+#         complaint_id=complaint_id,
+#         proof_files=proof_files,
+        
+        
+#     )
+
+
+
+@router.post(
+    "/{complaint_id}/submit-proof", 
+    response_model=ComplaintResponse, 
+    dependencies=[Depends(roles_required(["CM"]))]
+)
 async def submit_proof(
     complaint_id: str,
-    files: List[UploadFile] = File(...)
+    files: List[UploadFile] = File(...),
+    current_user: User = Depends(get_current_user)  # get logged-in user
 ):
     """
     Submit proof files (images/docs) for a complaint.
@@ -135,7 +175,9 @@ async def submit_proof(
 
     return await submit_proof_controller(
         complaint_id=complaint_id,
-        proof_files=proof_files
+        submitter_id=str(current_user.id),  # pass current user's ID
+        proof_files=proof_files,
+        role=current_user.role  # pass user's role, e.g., "CM"
     )
 
 

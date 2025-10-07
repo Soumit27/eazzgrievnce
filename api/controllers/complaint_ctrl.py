@@ -1,4 +1,3 @@
-
 # api/controllers/complaint_ctrl.py
 from api.db.models.complaint import Complaint, Assignment, ProofFile, Worker, ComplaintStatus, AssignmentStatus
 from typing import List, Dict, Optional
@@ -135,7 +134,7 @@ async def assign_complaint_controller(
 
     sla_deadline = datetime.utcnow() + timedelta(minutes=sla_minutes)
     assignment = Assignment(
-        group=group,
+        group="Worker",
         worker_id=str(worker.id) if worker else None,
         assigned_by=str(assigned_by),
         assigned_user_id=str(worker.id) if worker else None,

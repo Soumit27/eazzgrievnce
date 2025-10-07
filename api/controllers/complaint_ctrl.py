@@ -159,24 +159,37 @@ async def assign_complaint_controller(
     return complaint_to_dict(complaint)
 
 
-async def submit_proof_controller(complaint_id: str, proof_files: List[ProofFile]) -> Dict:
+async def submit_proof_controller(
+    complaint_id: str,
+    submitter_id: str,
+    proof_files: List[ProofFile],
+    role: str
+) -> Dict:
     complaint = await Complaint.get(_to_object_id(complaint_id))
     if not complaint:
-        raise HTTPException(status_code=200, detail="Complaint not found")
+        raise HTTPException(status_code=404, detail="Complaint not found")
 
     current = _get_current_assignment(complaint)
-    if current.status != AssignmentStatus.ASSIGNED:
-        raise HTTPException(status_code=200, detail="Assignment not in assigned state")
+    if not current:
+        raise HTTPException(status_code=404, detail="No active assignment found")
+    
+    if current.status != AssignmentStatus.ASSIGNED_TO_CONTRACTOR:
+        raise HTTPException(status_code=403, detail="Complaint not in valid state for submission")
+
+    if role == "Contractor":
+        if str(current.worker_id) != str(submitter_id):
+            raise HTTPException(status_code=403, detail="Contractor not assigned to this complaint")
+    elif role != "JE":
+        raise HTTPException(status_code=403, detail="Unauthorized role for proof submission")
 
     current.proof_files = proof_files
     current.status = AssignmentStatus.SUBMITTED_BY_CM
     current.submitted_at = datetime.utcnow()
     complaint.status = ComplaintStatus.SUBMITTED_BY_CM
     complaint.updated_at = datetime.utcnow()
-
     await complaint.save()
-    return complaint_to_dict(complaint)
 
+    return complaint_to_dict(complaint)
 
 async def verify_proof_controller(complaint_id: str, je_id: str, action: str, note: Optional[str] = None) -> Dict:
     complaint = await Complaint.get(_to_object_id(complaint_id))
@@ -243,3 +256,173 @@ async def escalate_complaint_controller(complaint_id: str, reason: str) -> Dict:
     complaint.updated_at = datetime.utcnow()
     await complaint.save()
     return complaint_to_dict(complaint)
+
+
+
+
+# ------------------ Forward complaint to JE ------------------
+async def forward_to_je_controller(complaint_id: str, cm_id: str, je_id: str) -> Dict:
+    complaint = await Complaint.get(_to_object_id(complaint_id))
+    if not complaint:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+    if complaint.status != ComplaintStatus.ASSIGNED:
+        raise HTTPException(status_code=400, detail="Only assigned complaints can be forwarded")
+    
+    # Add forward assignment
+    assignment = Assignment(
+        group="JE",
+        assigned_user_id=str(je_id),
+        assigned_by=str(cm_id),
+        assigned_at=datetime.utcnow(),
+        status=AssignmentStatus.ASSIGNED
+    )
+    complaint.assignments = complaint.assignments or []
+    complaint.assignments.append(assignment)
+    complaint.current_assignment_index = len(complaint.assignments) - 1
+    complaint.status = ComplaintStatus.FORWARDED_TO_JE
+    complaint.updated_at = datetime.utcnow()
+    await complaint.save()
+    return complaint_to_dict(complaint)
+
+# ------------------ JE creates contractor ------------------
+async def create_contractor_controller(je_id: str, contractor_data: dict) -> Dict:
+    """
+    JE can create a contractor. Only JE ID is saved in created_by_je.
+    """
+    # Ensure je_id is string
+    contractor_data["created_by_je"] = str(je_id)
+
+    # Set role explicitly as contractor
+    contractor_data["role"] = "contractor"
+    contractor_data["available"] = True
+    contractor_data["group"] = "Contractor"
+
+    # Create and insert contractor
+    contractor = Worker(**contractor_data)
+    saved_contractor = await contractor.insert()
+
+    return {
+        "id": str(saved_contractor.id),
+        "full_name": saved_contractor.full_name,
+        "role": saved_contractor.role,
+        "created_by_je": saved_contractor.created_by_je,
+        "available": saved_contractor.available,
+        "group": saved_contractor.group,
+    }
+
+
+# ------------------ Assign contractor (JE only) ------------------
+async def assign_contractor_controller(
+    complaint_id: str, contractor_id: str, je_id: str, sla_minutes: int = 240
+) -> Dict:
+    complaint = await Complaint.get(_to_object_id(complaint_id))
+    contractor = await Worker.get(_to_object_id(contractor_id))
+
+    if not complaint or not contractor:
+        raise HTTPException(status_code=404, detail="Complaint or contractor not found")
+
+    if str(getattr(contractor, "created_by_je", None)) != str(je_id):
+        raise HTTPException(status_code=403, detail="JE can only assign contractors they created")
+
+
+    assignment = Assignment(
+        group="Contractor",
+        worker_id=str(contractor.id),
+        assigned_user_id=str(contractor.id),
+        assigned_by=str(je_id),
+        assigned_at=datetime.utcnow(),
+        status=AssignmentStatus.ASSIGNED_TO_CONTRACTOR,
+        sla_deadline=datetime.utcnow() + timedelta(minutes=sla_minutes)
+    )
+
+    complaint.assignments = complaint.assignments or []
+    complaint.assignments.append(assignment)
+    complaint.current_assignment_index = len(complaint.assignments) - 1
+    complaint.status = ComplaintStatus.ASSIGNED
+    complaint.updated_at = datetime.utcnow()
+    await _set_worker_availability(contractor.id, available=False)
+    await complaint.save()
+    return complaint_to_dict(complaint)
+
+# ------------------ Contractor submits proof ------------------
+async def submit_proof_controller(
+    complaint_id: str,
+    submitter_id: str,
+    proof_files: List[ProofFile],
+    role: str  # "CM" or "JE"
+) -> Dict:
+    """
+    Handles submission of proof files.
+    - CM submits proof for Worker assignments
+    - JE submits proof for Contractor assignments
+    """
+
+    complaint = await Complaint.get(_to_object_id(complaint_id))
+    if not complaint:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+
+    current = _get_current_assignment(complaint)
+    if not current:
+        raise HTTPException(status_code=404, detail="No active assignment found")
+
+    # Role-specific checks
+    if role == "CM":
+        if current.group != "Worker":
+            raise HTTPException(status_code=403, detail="CM can only submit proof for Worker")
+        current.status = AssignmentStatus.SUBMITTED_BY_CM
+        complaint.status = ComplaintStatus.SUBMITTED_BY_CM
+
+    elif role == "JE":
+        if current.group != "Contractor":
+            raise HTTPException(status_code=403, detail="JE can only submit proof for Contractor")
+        current.status = AssignmentStatus.SUBMITTED_BY_JE
+        complaint.status = ComplaintStatus.SUBMITTED_BY_JE
+
+    else:
+        raise HTTPException(status_code=403, detail="Unauthorized role for proof submission")
+
+    current.proof_files = proof_files
+    current.submitted_at = datetime.utcnow()
+    complaint.updated_at = datetime.utcnow()
+    await complaint.save()
+
+    return complaint_to_dict(complaint)
+
+
+# ------------------ JE verifies contractor work ------------------
+async def je_verify_contractor_controller(
+    complaint_id: str,
+    je_id: str,
+    action: str,
+    note: Optional[str] = None
+) -> Dict:
+    complaint = await Complaint.get(_to_object_id(complaint_id))
+    if not complaint:
+        raise HTTPException(status_code=404, detail="Complaint not found")
+
+    current = _get_current_assignment(complaint)
+
+    # ✅ JE is allowed to verify directly (no CM or contractor proof check)
+    if not current:
+        raise HTTPException(status_code=400, detail="No active assignment found for this complaint")
+
+    if action == "approve":
+        current.status = AssignmentStatus.VERIFIED_BY_JE
+        current.verified_by = str(je_id)
+        current.verified_at = datetime.utcnow()
+        complaint.status = ComplaintStatus.VERIFIED_BY_JE
+    elif action == "reject":
+        current.status = AssignmentStatus.ESCALATED
+        current.escalate_reason = note or "Rejected by JE"
+        complaint.status = ComplaintStatus.ESCALATED
+    else:
+        raise HTTPException(status_code=400, detail="Invalid action")
+
+    if current.worker_id:
+        await _set_worker_availability(current.worker_id, True)
+
+    complaint.updated_at = datetime.utcnow()
+    await complaint.save()
+    return complaint_to_dict(complaint)
+
+

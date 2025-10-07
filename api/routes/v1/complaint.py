@@ -1,13 +1,19 @@
+from api.input_schema.worker_schema import ContractorCreate
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from typing import List
 import os, shutil, uuid
 
 from api.db.models.user import User
-from api.db.models.complaint import Complaint, Worker
+from api.db.models.complaint import Complaint, ProofFile, Worker
 from api.controllers.complaint_ctrl import (
+    assign_contractor_controller,
+    # contractor_submit_proof_controller,
     create_complaint_controller,
+    create_contractor_controller,
+    forward_to_je_controller,
     get_all_complaints_controller,
     assign_complaint_controller,
+    je_verify_contractor_controller,
     submit_proof_controller,
     verify_proof_controller,
     manager_approve_close_controller,
@@ -27,12 +33,13 @@ router = APIRouter(prefix="/complaint", tags=["Complaints"])
 # 1) Submit a new complaint
 # =======================
 @router.post("/", response_model=ComplaintResponse)
-async def create_complaint(payload: ComplaintCreate, current_user: User = Depends(get_current_user)):
+async def create_complaint(payload: ComplaintCreate):
     """
-    Any user can submit a complaint.
+    Any user can submit a complaint (no authentication required).
     """
-    complaint = Complaint(**payload.dict(), created_by=current_user.id)
+    complaint = Complaint(**payload.dict())  # Remove created_by if you don't have a user
     return await create_complaint_controller(complaint)
+
 
 
 # =======================
@@ -41,41 +48,6 @@ async def create_complaint(payload: ComplaintCreate, current_user: User = Depend
 @router.get("/", response_model=List[ComplaintResponse])
 async def get_all_complaints():
     return await get_all_complaints_controller()
-
-
-# # =======================
-# # 3) Assign complaint to worker (CM only)
-# # =======================
-# @router.post("/{complaint_id}/assign", response_model=ComplaintResponse, dependencies=[Depends(roles_required(["CM"]))])
-# async def assign_complaint(
-#     complaint_id: str,
-#     payload: AssignRequest,
-#     current_user: User = Depends(get_current_user)
-# ):
-#     """
-#     Only CM can assign the work.
-#     Auto-select worker if not provided and check worker capacity.
-#     """
-#     worker_user_id = payload.worker_user_id
-#     if not worker_user_id:
-#         workers = await Worker.find({"available": True}).to_list()
-#         for w in workers:
-#             active_count = await get_active_assignments_count(str(w.id))
-#             if active_count < (w.max_tasks or 3):
-#                 worker_user_id = str(w.id)
-#                 break
-#         if not worker_user_id:
-#             raise HTTPException(status_code=400, detail="No available worker to assign")
-
-#     return await assign_complaint_controller(
-#         complaint_id,
-#         group=payload.group,
-#         worker_user_id=worker_user_id,
-#         assigned_by=current_user.id,
-#         sla_minutes=payload.sla_minutes
-#     )
-
-
 
 # =======================
 # 3) Assign complaint to worker (CM only)
@@ -95,21 +67,6 @@ async def assign_complaint(
     # --- Step 1: Fetch all workers and calculate their workload ---
     all_workers = await Worker.find_all().to_list()
     workers_info = []
-
-    # for worker in all_workers:
-    #     active_count = await get_active_assignments_count(str(worker.id))
-    #     workers_info.append({
-    #         "id": str(worker.id),
-    #         "name": getattr(worker, "name", ""),
-    #         "email": getattr(worker, "email", ""),
-    #         "group": getattr(worker, "group", "Worker"),
-    #         "available": getattr(worker, "available", True),
-    #         "max_tasks": getattr(worker, "max_tasks", 3),
-    #         "active_tasks": active_count,
-    #         "can_take_more": getattr(worker, "available", True)
-    #         and active_count < getattr(worker, "max_tasks", 3)
-    #     })
-
 
     for worker in all_workers:
        active_count = await get_active_assignments_count(str(worker.id))
@@ -227,4 +184,58 @@ async def escalate_complaint(
         complaint_id,
         reason=payload.reason
     )
+
+
+
+
+# ------------------ Forward to JE (CM only) ------------------
+@router.post("/{complaint_id}/forward-to-je", dependencies=[Depends(roles_required(["CM"]))])
+async def forward_to_je(complaint_id: str, je_id: str, current_user: User = Depends(get_current_user)):
+    return await forward_to_je_controller(complaint_id, cm_id=current_user.id, je_id=je_id)
+
+# ------------------ Create Contractor (JE only) ------------------
+@router.post("/create-contractor", dependencies=[Depends(roles_required(["JE"]))])
+async def create_contractor(payload: ContractorCreate, current_user: User = Depends(get_current_user)):
+    return await create_contractor_controller(current_user.id, payload.dict())
+
+# ------------------ Assign Contractor (JE only) ------------------
+@router.post("/{complaint_id}/assign-contractor", dependencies=[Depends(roles_required(["JE"]))])
+async def assign_contractor(complaint_id: str, contractor_id: str, current_user: User = Depends(get_current_user)):
+    return await assign_contractor_controller(complaint_id, contractor_id, je_id=current_user.id)
+
+# ------------------ Contractor submits proof ------------------
+@router.post("/{complaint_id}/je-submit-proof", dependencies=[Depends(roles_required(["JE"]))])
+async def je_submit_proof(
+    complaint_id: str,
+    files: List[UploadFile] = File(...),
+    current_user: User = Depends(get_current_user)
+):
+    upload_folder = f"uploads/{complaint_id}"
+    os.makedirs(upload_folder, exist_ok=True)
+
+    proof_files = []
+    for f in files:
+        unique_filename = f"{uuid.uuid4()}_{f.filename}"
+        file_path = os.path.join(upload_folder, unique_filename)
+        with open(file_path, "wb") as buffer:
+            shutil.copyfileobj(f.file, buffer)
+
+        proof_files.append(
+            ProofFile(file_name=f.filename, file_url=f"/uploads/{complaint_id}/{unique_filename}")
+        )
+
+    # Call controller with role="JE"
+    return await submit_proof_controller(
+        complaint_id=complaint_id,
+        submitter_id=current_user.id,
+        proof_files=proof_files,
+        role="JE"
+    )
+
+
+
+# ------------------ JE verifies contractor work ------------------
+@router.post("/{complaint_id}/je-verify-contractor", dependencies=[Depends(roles_required(["JE"]))])
+async def je_verify_contractor(complaint_id: str, payload: VerifyActionRequest, current_user: User = Depends(get_current_user)):
+    return await je_verify_contractor_controller(complaint_id, je_id=current_user.id, action=payload.action, note=payload.note)
 

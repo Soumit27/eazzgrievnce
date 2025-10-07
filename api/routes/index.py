@@ -7,7 +7,7 @@ from api.routes.v1 import (
      auth as v1_auth,
      complaint as v1_complaint,
      worker as v1_worker,
-     roles as v1_roles
+     roles as v1_roles,
 )
 
 router = APIRouter()
@@ -19,5 +19,7 @@ router.include_router(v1_user.router, prefix=API_VERSION)
 router.include_router(v1_complaint.router, prefix=API_VERSION)
 router.include_router(v1_worker.router, prefix=API_VERSION)
 router.include_router(v1_roles.router, prefix=API_VERSION)
+
+
 
 

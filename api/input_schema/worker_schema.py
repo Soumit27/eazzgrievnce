@@ -14,3 +14,9 @@ class WorkerResponse(BaseModel):
     active_tasks: int = 0
     last_assigned_at: Optional[str] = None
     created_at: datetime
+
+
+class ContractorCreate(BaseModel):
+    full_name: str
+    email: str
+    role: str = "Contractor"

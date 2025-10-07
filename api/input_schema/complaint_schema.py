@@ -29,7 +29,10 @@ class AssignmentSchema(BaseModel):
         'verified_by_gm',
         'verified',
         'escalated',
-        'cancelled'
+        'cancelled',
+        'assigned_to_contractor',   # <-- added
+        'submitted_by_contractor',  # <-- added
+        'submitted_by_je'           # optional if you use it
     ]] = 'assigned'
     assigned_at: Optional[datetime] = None
     sla_deadline: Optional[datetime] = None
@@ -39,7 +42,8 @@ class AssignmentSchema(BaseModel):
     submitted_at: Optional[datetime] = None
     verified_at: Optional[datetime] = None
     escalate_reason: Optional[str] = None
-    final_note: Optional[str] = None 
+    final_note: Optional[str] = None
+
 
 
 # ------------------ Request Schemas ------------------ #
@@ -106,3 +110,16 @@ class ManagerApproveRequest(BaseModel):
 
 class EscalateRequest(BaseModel):
     reason: str
+
+
+class ForwardToJeRequest(BaseModel):
+    je_id: str
+    reason: Optional[str] = None
+
+class ContractorCreateRequest(BaseModel):
+    name: str
+    email: Optional[str] = None
+
+class AssignContractorRequest(BaseModel):
+    contractor_id: str
+    sla_minutes: Optional[int] = 240
